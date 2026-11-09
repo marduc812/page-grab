@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const path = require('node:path');
 const read = (file) => fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
 
-function worker({ inactive = false, errors = [] } = {}) {
+function worker({ inactive = false, errors = [], firefox = false, clipboardError = null } = {}) {
   let listener, now = 10000;
   const calls = [];
   const event = { addListener() {} };
@@ -26,9 +26,19 @@ function worker({ inactive = false, errors = [] } = {}) {
       }
     }
   };
+  const copied = [];
+  if (firefox) {
+    context.browser = context.chrome;
+    delete context.chrome;
+    context.browser.clipboard = { async setImageData(data, type) {
+      if (clipboardError) throw new Error(clipboardError);
+      copied.push({ data, type });
+    } };
+  }
   vm.runInNewContext(read('background.js'), context);
   return {
-    calls,
+    calls, copied,
+    copy: (imageData) => new Promise((resolve) => listener({ type: 'copy-image', imageData }, { tab: { id: 1 } }, resolve)),
     capture: () => new Promise((resolve) => listener({ type: 'capture-visible' }, { tab: { id: 1, windowId: 3 } }, resolve))
   };
 }
@@ -132,4 +142,53 @@ test('scroll and capture the main container when the document does not scroll', 
 test('fail visibly when a page blocks scrolling instead of returning a partial capture', async () => {
   const {context}=captureContext({blocked:true});
   await assert.rejects(context.capture(toast), /prevented scrolling/);
+});
+
+
+test('Firefox background captures with browser APIs and copies PNG bytes', async () => {
+  const w = worker({ firefox: true });
+  assert.ok((await w.capture()).dataUrl);
+  const data = new Uint8Array([137, 80, 78, 71]).buffer;
+  assert.equal((await w.copy(data)).ok, true);
+  assert.equal(w.copied[0].data, data);
+  assert.equal(w.copied[0].type, 'png');
+});
+
+test('Firefox clipboard failures reach the export panel', async () => {
+  const w = worker({ firefox: true, clipboardError: 'Clipboard denied' });
+  assert.equal((await w.copy(new ArrayBuffer(0))).error, 'Clipboard denied');
+});
+
+test('Firefox content uses promise messaging for capture and PNG copy', async () => {
+  const { context } = captureContext();
+  const messages = [];
+  context.browser = { runtime: { getBrowserInfo() {}, async sendMessage(message) {
+    messages.push(message);
+    return message.type === 'capture-visible' ? { dataUrl: 'firefox-image' } : { ok: true };
+  } } };
+  delete context.chrome;
+  context.window.__fpcBusy = false;
+  const source = read('content.js');
+  vm.runInNewContext(source.slice(0, source.lastIndexOf('  (async () => {')) + 'globalThis.helpers = {requestCapture, copyImage};})();', context);
+  assert.equal(await context.helpers.requestCapture(), 'firefox-image');
+  const data = new Uint8Array([137, 80, 78, 71]).buffer;
+  await context.helpers.copyImage({ arrayBuffer: async () => data });
+  assert.equal(messages[1].type, 'copy-image');
+  assert.equal(messages[1].imageData, data);
+  context.browser.runtime.sendMessage = async () => ({ error: 'Denied' });
+  await assert.rejects(context.helpers.copyImage({ arrayBuffer: async () => data }), /Denied/);
+});
+
+test('Chrome with a browser namespace still copies through the web clipboard', async () => {
+  const { context } = captureContext();
+  context.window.__fpcBusy = false;
+  context.browser = { runtime: {} };
+  let copied;
+  context.ClipboardItem = class { constructor(items) { this.items = items; } };
+  context.navigator = { clipboard: { async write(items) { copied = items; } } };
+  const source = read('content.js');
+  vm.runInNewContext(source.slice(0, source.lastIndexOf('  (async () => {')) + 'globalThis.copyImage = copyImage;})();', context);
+  const blob = {};
+  await context.copyImage(blob);
+  assert.equal(copied[0].items['image/png'], blob);
 });

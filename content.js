@@ -2,6 +2,7 @@
   if (window.__fpcBusy) return;
   window.__fpcBusy = true;
 
+  const extensionAPI = globalThis.browser ?? globalThis.chrome;
   const PANEL_ID = "__fpc-panel-host";
   const MAX_CANVAS_DIM = 16000;
   const MAX_CANVAS_AREA = 200_000_000;
@@ -22,14 +23,29 @@
     });
   }
 
-  function requestCapture() {
+  function sendMessage(message) {
+    if (globalThis.browser) return browser.runtime.sendMessage(message);
     return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ type: "capture-visible" }, (res) => {
-        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-        if (!res || res.error) return reject(new Error(res?.error || "Capture failed"));
-        resolve(res.dataUrl);
+      extensionAPI.runtime.sendMessage(message, (response) => {
+        if (extensionAPI.runtime.lastError) return reject(new Error(extensionAPI.runtime.lastError.message));
+        resolve(response);
       });
     });
+  }
+
+  async function requestCapture() {
+    const response = await sendMessage({ type: "capture-visible" });
+    if (!response || response.error) throw new Error(response?.error || "Capture failed");
+    return response.dataUrl;
+  }
+
+  async function copyImage(blob) {
+    if (typeof extensionAPI?.runtime?.getBrowserInfo === "function") {
+      const response = await sendMessage({ type: "copy-image", imageData: await blob.arrayBuffer() });
+      if (!response?.ok) throw new Error(response?.error || "Copy failed");
+    } else {
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+    }
   }
 
   function hideFixedElements(scrollElement, bottomOnly = false) {
@@ -536,12 +552,12 @@
       root.querySelector(".dl span").textContent = `Save ${format === "webp" ? "WebP" : format.toUpperCase()}`;
     };
     // Extension storage keeps this preference across sites without touching site data.
-    if (typeof chrome !== "undefined" && chrome.storage?.local) {
-      chrome.storage.local.get("exportFormat").then((saved) => { if (!changed) selectFormat(saved.exportFormat); }).catch(() => {});
+    if (extensionAPI?.storage?.local) {
+      extensionAPI.storage.local.get("exportFormat").then((saved) => { if (!changed) selectFormat(saved.exportFormat); }).catch(() => {});
     }
     for (const button of root.querySelectorAll("[data-format]")) button.addEventListener("click", () => {
       changed = true; selectFormat(button.dataset.format);
-      if (typeof chrome !== "undefined" && chrome.storage?.local) chrome.storage.local.set({ exportFormat: format }).catch(() => setStatus("Format selected. Could not remember it for next time."));
+      if (extensionAPI?.storage?.local) extensionAPI.storage.local.set({ exportFormat: format }).catch(() => setStatus("Format selected. Could not remember it for next time."));
     });
     const save = (file, extension) => {
       if (!host.isConnected) return;
@@ -561,7 +577,7 @@
     };
     root.querySelector(".copy").addEventListener("click", (event) => runExport(event.currentTarget, async () => {
       try {
-        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        await copyImage(blob);
       } catch { throw new Error("Clipboard unavailable. Save the image instead."); }
     }));
     root.querySelector(".dl").addEventListener("click", (event) => runExport(event.currentTarget, async () => {

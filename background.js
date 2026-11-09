@@ -1,7 +1,8 @@
+const extensionAPI = globalThis.browser ?? globalThis.chrome;
 const MENU_ID = "capture-full-page";
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
+extensionAPI.runtime.onInstalled.addListener(() => {
+  extensionAPI.contextMenus.create({
     id: MENU_ID,
     title: "Capture full page as image",
     contexts: ["all"]
@@ -11,27 +12,27 @@ chrome.runtime.onInstalled.addListener(() => {
 async function startCapture(tab) {
   if (!tab || tab.id == null) return;
   try {
-    await chrome.scripting.executeScript({
+    await extensionAPI.scripting.executeScript({
       target: { tabId: tab.id },
       files: ["content.js"]
     });
   } catch (err) {
-    chrome.action.setBadgeBackgroundColor({ color: "#dc2626" });
-    chrome.action.setBadgeText({ tabId: tab.id, text: "!" });
-    setTimeout(() => chrome.action.setBadgeText({ tabId: tab.id, text: "" }), 3000);
+    extensionAPI.action.setBadgeBackgroundColor({ color: "#dc2626" });
+    extensionAPI.action.setBadgeText({ tabId: tab.id, text: "!" });
+    setTimeout(() => extensionAPI.action.setBadgeText({ tabId: tab.id, text: "" }), 3000);
     console.warn("Cannot capture this page:", err);
   }
 }
 
-chrome.action.onClicked.addListener(startCapture);
+extensionAPI.action.onClicked.addListener(startCapture);
 
-chrome.contextMenus.onClicked.addListener((info, tab) => {
+extensionAPI.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === MENU_ID) startCapture(tab);
 });
 
-chrome.commands.onCommand.addListener(async (command, tab) => {
+extensionAPI.commands.onCommand.addListener(async (command, tab) => {
   if (command !== "capture-full-page") return;
-  if (!tab) [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab) [tab] = await extensionAPI.tabs.query({ active: true, currentWindow: true });
   startCapture(tab);
 });
 
@@ -46,11 +47,11 @@ async function captureVisible(sender) {
   if (sender.tab?.id == null) throw new Error("Capture must come from a browser tab");
   for (let attempt = 0; attempt < 4; attempt++) {
     await sleep(Math.max(0, CAPTURE_INTERVAL - (Date.now() - lastCaptureAt)));
-    const [active] = await chrome.tabs.query({ active: true, windowId: sender.tab.windowId });
+    const [active] = await extensionAPI.tabs.query({ active: true, windowId: sender.tab.windowId });
     if (active?.id !== sender.tab.id) throw new Error("Keep the page's tab active until capture finishes");
     lastCaptureAt = Date.now();
     try {
-      const dataUrl = await chrome.tabs.captureVisibleTab(sender.tab.windowId, { format: "png" });
+      const dataUrl = await extensionAPI.tabs.captureVisibleTab(sender.tab.windowId, { format: "png" });
       return { dataUrl };
     } catch (error) {
       if (attempt === 3 || !/MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND|quota|rate limit/i.test(error.message)) throw error;
@@ -58,7 +59,15 @@ async function captureVisible(sender) {
   }
 }
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+extensionAPI.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === "copy-image" && extensionAPI.clipboard?.setImageData) {
+    if (sender.tab?.id == null) return;
+    extensionAPI.clipboard.setImageData(msg.imageData, "png").then(
+      () => sendResponse({ ok: true }),
+      (error) => sendResponse({ error: error.message })
+    );
+    return true;
+  }
   if (msg?.type !== "capture-visible") return;
   const result = captureQueue.then(() => captureVisible(sender));
   captureQueue = result.catch(() => {});
