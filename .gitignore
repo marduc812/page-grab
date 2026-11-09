@@ -1,0 +1,38 @@
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+.aws/
+.ssh/
+credentials.json
+service-account*.json
+*service-account*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Local browser profiles and captures
+profile/
+chrome-profile/
+captures/
+downloads/
+
+# Build output and dependencies
+node_modules/
+dist/
+build/
+*.zip
+*.crx
+*.log
+
+# Python and editor files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+.idea/
+.vscode/

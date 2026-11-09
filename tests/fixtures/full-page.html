@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+*{box-sizing:border-box}html,body{margin:0;font:16px -apple-system,system-ui}body{background:radial-gradient(at 100% 0%,#ed8cbe,transparent 60%),linear-gradient(120deg,#c9e6ff,#c1b6ed);background-attachment:fixed}.section{height:800px;padding:70px;color:#162332;border-bottom:1px solid #ffffff55}h1{font-size:54px;letter-spacing:-2px;font-weight:600}.end{background:#16c784}.section p{max-width:450px;line-height:1.7}header{height:64px;padding:20px;background:#ffffff55;border-bottom:1px solid #ffffff66}body.nested{height:100vh;overflow:hidden}.nested main{position:absolute;top:64px;left:20px;right:20px;bottom:20px;overflow-y:auto;border-radius:20px}.nested .section{height:800px}
+</style></head><body><header>Journal / A space for ideas</header><main><section class="section"><h1>Make room<br>for something new.</h1><p>The capture must include every section, even when the page reveals more content as it scrolls.</p></section><section class="section"><h1>The middle</h1></section><section class="section"><h1>Keep scrolling</h1></section><section class="section end"><h1>Original bottom</h1></section></main><aside id="composer" style="position:fixed;bottom:12px;left:20%;width:60%;height:130px;background:#ff0000;z-index:10;border-radius:24px;padding:30px">Floating message composer</aside><script>
+const isNested=location.search.includes('nested');if(isNested)document.body.classList.add('nested');
+const area=isNested?document.querySelector('main'):document.scrollingElement;
+let grew=false;const scrolls=[];
+(isNested?area:window).addEventListener('scroll',()=>{
+ scrolls.push(area.scrollTop);
+ if(!grew && area.scrollTop+area.clientHeight>=area.scrollHeight-30){
+  grew=true;document.querySelector('.end').classList.remove('end');
+  const section=document.createElement('section');section.className='section end';section.innerHTML='<h1>The actual bottom</h1><p>This section loaded after scrolling. The PNG must include it.</p>';document.querySelector('main').appendChild(section);
+ }
+});
+let serial=0;const callbacks=new Map();window.captureReply=(id,data)=>{callbacks.get(id)({dataUrl:data});callbacks.delete(id)};
+window.chrome={runtime:{sendMessage:(_,callback)=>{const id=++serial;callbacks.set(id,callback);captureBridge(String(id));}}};
+const toBlob=HTMLCanvasElement.prototype.toBlob;
+HTMLCanvasElement.prototype.toBlob=function(callback,...args){window.outputSize=[this.width,this.height];return toBlob.call(this,(blob)=>{window.outputBlob=blob;callback(blob)},...args)};
+window.ClipboardItem=class{};Object.defineProperty(navigator,'clipboard',{value:{write:async()=>{}}});
+</script><script src="content.js"></script></body></html>

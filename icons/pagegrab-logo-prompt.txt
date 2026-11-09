@@ -1,0 +1,10 @@
+Generated with the built-in image_gen tool.
+
+Use case: logo-brand
+Asset type: illustrated logo for a browser extension that captures full web pages, also usable as an app icon.
+Primary request: A hand grabbing a web page as though the page were a piece of soft fabric. The hand firmly pinches the upper right area of the page between the thumb and curled fingers; the page visibly bunches and gathers at the grip, with elegant folds radiating down through it. This tactile grabbing action is the whole idea.
+Style/medium: polished simple editorial illustration, bold clean silhouettes, softly rounded contours, restrained dimensional shading. Refined and playful. Icon-like rather than a detailed scene.
+Subject: one anatomically coherent simplified warm peach hand with a short wrist, and one blue-white web page. The page retains a recognizable rectangular lower silhouette, a subtle browser header and two or three simple blue content strokes that bend with the fabric folds. Vivid blue page edges and deep navy contours relate to the app's #0064d7 accent.
+Composition/framing: single centered compact emblem, square canvas, ample transparent padding, hand and page form one connected silhouette, readable at small sizes.
+Scene/backdrop: genuinely transparent background.
+Constraints: no lettering, no words, no watermark, no surrounding badge or frame, no extra objects, no extra hands. Convey pinched fabric folds clearly without making it look like a crumpled ball or a rigid sheet held flat.
