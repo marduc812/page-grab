@@ -131,6 +131,7 @@
     let stopped = false;
     const update = () => {
       if (!host.isConnected) { stop(); return; }
+      if (host.style.getPropertyValue("visibility") === "hidden") return;
       const rect = surface.getBoundingClientRect();
       const old = host.style.getPropertyValue("pointer-events");
       const priority = host.style.getPropertyPriority("pointer-events");
@@ -235,8 +236,13 @@
     };
   }
 
-  async function settle(area, bottom = false) {
-    await sleep(bottom ? 450 : 160);
+  const afterPaint = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+  async function settle(area, delay = 160) {
+    // The loading pass needs time for scroll-triggered work. On the capture
+    // pass, wait for the scroll and hidden notification to paint instead.
+    if (delay) await sleep(delay);
+    else await afterPaint();
     // Give lazy images in this screen time to decode, with a bounded wait.
     const rect = area.rect();
     const pending = [...document.images].filter((image) => {
@@ -244,10 +250,12 @@
       const r = image.getBoundingClientRect();
       return r.bottom > rect.top && r.top < rect.top + rect.height;
     });
-    if (pending.length) await Promise.race([
-      Promise.all(pending.map((image) => image.decode().catch(() => {}))), sleep(1400)
-    ]);
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    if (pending.length) {
+      await Promise.race([
+        Promise.all(pending.map((image) => image.decode().catch(() => {}))), sleep(1400)
+      ]);
+    }
+    if (delay || pending.length) await afterPaint();
   }
 
   async function captureFullPage(toast) {
@@ -264,70 +272,90 @@
     let restoreBottom;
     let canvas;
     try {
-      // Discover the real bottom first. Heights measured before scrolling miss lazy content.
-      area.scroll(original.x, 0);
-      await settle(area);
-      let steps = 0;
-      while (true) {
-        if (++steps > 300) throw new Error("This page keeps adding content. Capture stopped without saving an incomplete image.");
-        const height = area.height();
-        const viewport = area.viewport();
-        const current = area.y();
-        const next = Math.min(current + viewport * .85, Math.max(0, height - viewport));
-        toast.set("Loading full page…");
-        area.scroll(original.x, next);
-        await settle(area, next >= height - viewport - 2);
-        if (area.y() < next - 2) throw new Error("The page prevented scrolling to the bottom. Capture stopped.");
-        if (area.y() + area.viewport() >= area.height() - 2) {
-          // A second bottom check catches delayed infinite-scroll responses.
-          await sleep(700);
-          if (area.height() <= height + 2) break;
+      // Capture stable pages in one pass. If loading changes the height,
+      // warm the entire page and restart so shifted content cannot leave gaps.
+      const preparePage = async () => {
+        area.scroll(original.x, 0);
+        await settle(area);
+        let steps = 0;
+        while (true) {
+          if (++steps > 300) throw new Error("This page keeps adding content. Capture stopped without saving an incomplete image.");
+          const height = area.height();
+          const viewport = area.viewport();
+          const current = area.y();
+          const next = Math.min(current + viewport * .85, Math.max(0, height - viewport));
+          toast.set("Loading full page…");
+          area.scroll(original.x, next);
+          await settle(area, next >= height - viewport - 2 ? 450 : 160);
+          if (area.y() < next - 2) throw new Error("The page prevented scrolling to the bottom. Capture stopped.");
+          if (area.y() + area.viewport() >= area.height() - 2) {
+            // A second bottom check catches delayed infinite-scroll responses.
+            await sleep(700);
+            if (area.height() <= height + 2) break;
+          }
         }
-      }
+      };
       area.scroll(original.x, 0);
       await settle(area);
       restoreBottom = hideFixedElements(area.element, true);
       let totalH = area.height();
       let drawnUntil = 0;
       let frame = 0;
+      let prepared = false;
+      let restarts = 0;
       let pxScale, outScale, ctx, width;
-      const resizeOutput = (height) => {
+      const createOutput = () => {
         const fullW = width * pxScale;
-        const fullH = height * pxScale;
+        const fullH = totalH * pxScale;
         const scale = Math.min(1, MAX_CANVAS_DIM / fullW, MAX_CANVAS_DIM / fullH, Math.sqrt(MAX_CANVAS_AREA / (fullW * fullH)));
         const next = document.createElement("canvas");
         next.width = Math.max(1, Math.round(fullW * scale));
         next.height = Math.max(1, Math.round(fullH * scale));
         const nextCtx = next.getContext("2d");
         if (!nextCtx) throw new Error("This page is too large to capture");
-        if (canvas) {
-          nextCtx.drawImage(canvas, 0, 0, canvas.width, canvas.height, 0, 0, next.width, Math.round(totalH * pxScale * scale));
-          canvas.width = canvas.height = 1;
-        }
         canvas = next; ctx = nextCtx; outScale = scale;
+      };
+      const restartAfterLoading = async () => {
+        if (++restarts > 3) throw new Error("The page keeps changing size. Capture stopped without saving an incomplete image.");
+        if (restoreFixed) { restoreFixed(); restoreFixed = null; }
+        if (restoreBottom) { restoreBottom(); restoreBottom = null; }
+        toast.show();
+        if (canvas) { canvas.width = canvas.height = 1; canvas = null; }
+        await preparePage();
+        prepared = true;
+        totalH = area.height();
+        drawnUntil = 0;
+        area.scroll(original.x, 0);
+        restoreBottom = hideFixedElements(area.element, true);
       };
       while (true) {
         if (++frame > 300) throw new Error("This page keeps adding content. Capture stopped without saving an incomplete image.");
+        if (area.height() !== totalH) {
+          await restartAfterLoading();
+          continue;
+        }
         const target = Math.min(drawnUntil, Math.max(0, area.height() - area.viewport()));
         area.scroll(original.x, target);
-        await settle(area, target + area.viewport() >= area.height() - 2);
-        if (area.y() < target - 2) throw new Error("The page prevented scrolling. Capture stopped.");
-        const actualY = area.y();
         toast.set(`Capturing full page · ${Math.min(99, Math.round(drawnUntil / area.height() * 100))}%`);
         toast.hide();
-        // Hiding the notification must paint before Chrome samples the viewport.
-        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        await settle(area, prepared ? 0 : target + area.viewport() >= totalH - 2 ? 450 : 160);
+        if (area.height() !== totalH) {
+          await restartAfterLoading();
+          continue;
+        }
+        if (Math.abs(area.y() - target) > 2) throw new Error("The page prevented scrolling. Capture stopped.");
+        const actualY = area.y();
         const img = await loadImage(await requestCapture());
         try {
+          if (area.height() !== totalH) {
+            await restartAfterLoading();
+            continue;
+          }
           const rect = area.rect();
           if (!canvas) {
             width = rect.width;
             pxScale = img.width / window.innerWidth;
-            resizeOutput(totalH);
-          }
-          if (area.height() > totalH) {
-            resizeOutput(area.height());
-            totalH = area.height();
+            createOutput();
           }
           const top = Math.max(actualY, drawnUntil);
           const bottom = Math.min(totalH, actualY + rect.height);
@@ -343,7 +371,7 @@
         if (!restoreFixed && drawnUntil < totalH) restoreFixed = hideFixedElements(area.element);
         if (drawnUntil >= area.height() - 2) {
           await sleep(700);
-          if (drawnUntil >= area.height() - 2) break;
+          if (area.height() === totalH && drawnUntil >= totalH - 2) break;
         }
       }
       toast.set("Preparing image…");

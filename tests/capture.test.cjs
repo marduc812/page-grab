@@ -30,6 +30,7 @@ function worker({ inactive = false, errors = [], firefox = false, clipboardError
   if (firefox) {
     context.browser = context.chrome;
     delete context.chrome;
+    context.browser.runtime.getBrowserInfo = async () => ({ name: 'Firefox' });
     context.browser.clipboard = { async setImageData(data, type) {
       if (clipboardError) throw new Error(clipboardError);
       copied.push({ data, type });
@@ -48,7 +49,16 @@ test('concurrent capture requests share the rate limit', async () => {
   const results = await Promise.all([w.capture(), w.capture(), w.capture()]);
   assert.ok(results.every((result) => result.dataUrl));
   assert.equal(w.calls.length, 3);
-  for (let i = 1; i < w.calls.length; i++) assert.ok(w.calls[i] - w.calls[i - 1] >= 550);
+  for (let i = 1; i < w.calls.length; i++) assert.equal(w.calls[i] - w.calls[i - 1], 510);
+});
+
+test('Firefox captures without the Chrome delay, but backs off after quota errors', async () => {
+  const w = worker({ firefox: true });
+  await Promise.all([w.capture(), w.capture(), w.capture()]);
+  assert.deepEqual(w.calls, [10000, 10000, 10000]);
+  const limited = worker({ firefox: true, errors: ['rate limit'] });
+  assert.ok((await limited.capture()).dataUrl);
+  assert.equal(limited.calls[1] - limited.calls[0], 550);
 });
 
 test('retry rate limits and keep the queue usable after other failures', async () => {
@@ -73,6 +83,7 @@ function captureContext({ fail = false, grows = false, nested = false, blocked =
     removeProperty: (name) => values.delete(name)
   });
   const draws = [];
+  const scrolls = [];
   const doc = { scrollHeight: 2200, style: style() };
   const header = { style: style(), getBoundingClientRect: () => ({left:0,top:0,width:800,height:80,bottom:80}), contains: () => false };
   let grew = false;
@@ -85,6 +96,7 @@ function captureContext({ fail = false, grows = false, nested = false, blocked =
     window: { scrollX: 0, scrollY: 180, innerHeight: 1000, innerWidth: 800,
       scrollTo({left, top}) {
         if(blocked)return;
+        scrolls.push(top);
         this.scrollX=left; this.scrollY=Math.min(top,doc.scrollHeight-1000);
         if(grows && !grew && this.scrollY >= 1200) {doc.scrollHeight=4200;grew=true;}
       } },
@@ -95,16 +107,104 @@ function captureContext({ fail = false, grows = false, nested = false, blocked =
     chrome: { runtime: { sendMessage: (_, fn) => fn(fail ? { error: 'Capture failed' } : { dataUrl: 'image' }) } }
   };
   const source = read('content.js');
-  vm.runInNewContext(source.slice(0, source.lastIndexOf('  (async () => {')) + 'globalThis.capture = captureFullPage;})();', context);
-  return { context, draws, values, canvas, container };
+  vm.runInNewContext(source.slice(0, source.lastIndexOf('  (async () => {')) + 'globalThis.capture = captureFullPage; globalThis.settle = settle;})();', context);
+  return { context, draws, values, canvas, container, scrolls };
 }
 const toast = { set() {}, hide() {}, show() {} };
+
+test('loaded capture frames wait for paint without a fixed timer', async () => {
+  const { context } = captureContext();
+  let paints = 0;
+  context.requestAnimationFrame = (fn) => { paints++; fn(); };
+  context.setTimeout = () => { throw new Error('Unexpected fixed delay'); };
+  await context.settle({ rect: () => ({ top: 0, height: 1000 }) }, 0);
+  assert.equal(paints, 2);
+});
+
+test('capture frames still wait for visible lazy images and paint after decoding', async () => {
+  const { context } = captureContext();
+  const events = [];
+  context.requestAnimationFrame = (fn) => { events.push('paint'); fn(); };
+  // Leave the timeout pending so the image decode must finish the wait.
+  context.setTimeout = () => {};
+  context.document.images = [{
+    complete: false,
+    getBoundingClientRect: () => ({ top: 100, bottom: 200 }),
+    decode: async () => { events.push('decode'); }
+  }, {
+    complete: false,
+    getBoundingClientRect: () => ({ top: 1200, bottom: 1300 }),
+    decode: () => { throw new Error('Offscreen image should not delay capture'); }
+  }];
+  await context.settle({ rect: () => ({ top: 0, height: 1000 }) }, 0);
+  assert.deepEqual(events, ['paint', 'paint', 'decode', 'paint', 'paint']);
+});
 
 test('stitch overlapping frames without repainting earlier pixels', async () => {
   const { context, draws, values, canvas } = captureContext();
   assert.equal(await context.capture(toast), canvas);
   assert.equal(canvas.height, 2200);
   assert.deepEqual(draws.map((d) => [d[1], d[3], d[5], d[7]]), [[0,1000,0,1000], [0,1000,1000,1000], [800,200,2000,200]]);
+  assert.equal(context.window.scrollY, 180);
+  assert.deepEqual(values.get('scroll-behavior'), ['smooth', 'important']);
+  assert.equal(values.has('visibility'), false);
+});
+
+test('stable pages capture in one downward pass', async () => {
+  const { context, scrolls } = captureContext();
+  await context.capture(toast);
+  assert.deepEqual(scrolls, [0, 0, 1000, 1200, 180]);
+});
+
+test('height changes during screenshot delivery discard earlier pixels and recapture', async () => {
+  const { context, draws, canvas, scrolls } = captureContext();
+  let shots = 0;
+  context.chrome.runtime.sendMessage = (_, fn) => {
+    if (++shots === 2) context.document.documentElement.scrollHeight = 3200;
+    fn({ dataUrl: 'image' });
+  };
+  await context.capture(toast);
+  assert.equal(canvas.height, 3200);
+  // The first frame is drawn again after the changed layout is loaded.
+  assert.equal(draws.filter((d) => d[5] === 0).length, 2);
+  assert.equal(draws.at(-1)[5] + draws.at(-1)[7], 3200);
+  assert.equal(scrolls.at(-1), 180);
+});
+
+test('growth during the final bottom wait triggers a complete recapture', async () => {
+  const { context, canvas, draws } = captureContext();
+  let grew = false;
+  context.setTimeout = (fn, delay) => {
+    if (delay === 700 && !grew) {
+      grew = true;
+      context.document.documentElement.scrollHeight = 3200;
+    }
+    fn();
+  };
+  await context.capture(toast);
+  assert.equal(canvas.height, 3200);
+  assert.equal(draws.filter((d) => d[5] === 0).length, 2);
+});
+
+test('a shrinking page is recaptured at its new height', async () => {
+  const { context, canvas, draws } = captureContext();
+  let shots = 0;
+  context.chrome.runtime.sendMessage = (_, fn) => {
+    if (++shots === 2) context.document.documentElement.scrollHeight = 1400;
+    fn({ dataUrl: 'image' });
+  };
+  await context.capture(toast);
+  assert.equal(canvas.height, 1400);
+  assert.equal(draws.at(-1)[5] + draws.at(-1)[7], 1400);
+});
+
+test('repeated layout changes stop capture and restore page settings', async () => {
+  const { context, values } = captureContext();
+  context.chrome.runtime.sendMessage = (_, fn) => {
+    context.document.documentElement.scrollHeight += 10;
+    fn({ dataUrl: 'image' });
+  };
+  await assert.rejects(context.capture(toast), /keeps changing size/);
   assert.equal(context.window.scrollY, 180);
   assert.deepEqual(values.get('scroll-behavior'), ['smooth', 'important']);
   assert.equal(values.has('visibility'), false);

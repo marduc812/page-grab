@@ -38,7 +38,7 @@ extensionAPI.commands.onCommand.addListener(async (command, tab) => {
 
 // Chrome limits visible-tab captures to two calls per second per extension.
 // Keep one queue so simultaneous captures in different windows share that limit.
-const CAPTURE_INTERVAL = 550;
+const CAPTURE_INTERVAL = typeof extensionAPI.runtime.getBrowserInfo === "function" ? 0 : 510;
 let captureQueue = Promise.resolve();
 let lastCaptureAt = 0;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -46,7 +46,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function captureVisible(sender) {
   if (sender.tab?.id == null) throw new Error("Capture must come from a browser tab");
   for (let attempt = 0; attempt < 4; attempt++) {
-    await sleep(Math.max(0, CAPTURE_INTERVAL - (Date.now() - lastCaptureAt)));
+    // Back off on quota errors even on browsers without a fixed capture limit.
+    const interval = attempt ? Math.max(550, CAPTURE_INTERVAL) : CAPTURE_INTERVAL;
+    const delay = interval - (Date.now() - lastCaptureAt);
+    if (delay > 0) await sleep(delay);
     const [active] = await extensionAPI.tabs.query({ active: true, windowId: sender.tab.windowId });
     if (active?.id !== sender.tab.id) throw new Error("Keep the page's tab active until capture finishes");
     lastCaptureAt = Date.now();

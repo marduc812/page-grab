@@ -18,7 +18,7 @@
 - Export the capture as a PDF split across A4 pages.
 - Start a capture from the toolbar, the page's context menu, or `Alt+Shift+P`.
 
-PageGrab scrolls the page to load lazy content before capturing it. It also supports a main scrolling container when the document itself does not scroll. The capture restores your original scroll position afterward.
+PageGrab captures stable pages in one scroll pass and waits for visible lazy images. If loading changes the page height, it loads the full page and restarts the capture to avoid stitching together different layouts. It also supports a main scrolling container when the document itself does not scroll. The capture restores your original scroll position afterward.
 
 ## Install locally
 
@@ -101,6 +101,8 @@ python3 tests/browser_exports.py
 ```
 
 The scripts use Chrome's standard macOS installation path. Set `PAGEGRAB_CHROME` to use a different executable.
+
+The capture check reports elapsed time and screenshot count for growing pages, nested scrolling, static pages, and pages that fit one screen. Set `PAGEGRAB_CAPTURE_CASES=static,short` to select cases and `PAGEGRAB_CAPTURE_SOURCE=/absolute/path/content.js` to compare another version. These checks use a screenshot bridge with a 550 ms interval, not the extension's background queue.
 
 The Firefox integration check requires Python's `selenium` and Pillow packages. Selenium Manager must be able to obtain geckodriver on its first run. It installs the real extension in a temporary Firefox profile and checks capture, image/PDF export, and format storage on an HTTP page. Set `PAGEGRAB_TEST_CLIPBOARD=1` to also check copying, which replaces your clipboard with a capture.
 
