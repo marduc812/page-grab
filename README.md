@@ -18,7 +18,7 @@
 - Export the capture as a PDF split across A4 pages.
 - Start a capture from the toolbar, the page's context menu, or `Alt+Shift+P`.
 
-PageGrab captures stable pages in one scroll pass and waits for visible lazy images. If loading changes the page height, it loads the full page and restarts the capture to avoid stitching together different layouts. It also supports a main scrolling container when the document itself does not scroll. The capture restores your original scroll position afterward.
+PageGrab captures stable pages in one scroll pass and waits for visible lazy images. If loading changes the page height, it loads the full page and restarts the capture to avoid stitching together different layouts. It also supports a main scrolling container when the document itself does not scroll. When a visible dialog scrolls over a tall page, PageGrab captures its full scrolling content. Captures of scrolling panels include the surrounding app header and navigation once. The side margins extend alongside the captured content. If the popup fits on screen, PageGrab captures the current view without moving the page behind it. The capture restores your original scroll position afterward.
 
 ## Install locally
 
@@ -73,7 +73,7 @@ The manifest requests no persistent host permissions.
 
 Browsers block script injection on protected pages, including browser settings and extension stores. Firefox also restricts some Mozilla domains. In Chrome, local `file://` pages require **Allow access to file URLs** in the extension's details.
 
-Pages that block scrolling or keep adding content can stop a capture. Very large captures scale down to fit a maximum canvas dimension of 16,000 pixels and a maximum area of 200 million pixels. The PDF contains page images, so its text is not selectable.
+Pages that block scrolling or keep adding content can stop a capture. Minor height differences of up to two CSS pixels do not trigger a restart. If the page repeatedly changes height, PageGrab restores the original view and captures the visible area. The preview panel states when this fallback occurs. Very large captures scale down to fit a maximum canvas dimension of 16,000 pixels and a maximum area of 200 million pixels. The PDF contains page images, so its text is not selectable.
 
 ## Development
 
@@ -102,9 +102,9 @@ python3 tests/browser_exports.py
 
 The scripts use Chrome's standard macOS installation path. Set `PAGEGRAB_CHROME` to use a different executable.
 
-The capture check reports elapsed time and screenshot count for growing pages, nested scrolling, static pages, and pages that fit one screen. Set `PAGEGRAB_CAPTURE_CASES=static,short` to select cases and `PAGEGRAB_CAPTURE_SOURCE=/absolute/path/content.js` to compare another version. These checks use a screenshot bridge with a 550 ms interval, not the extension's background queue.
+The capture check reports elapsed time and screenshot count for growing pages, nested scrolling, static pages, pages that fit one screen, and popups over a tall document. Set `PAGEGRAB_CAPTURE_CASES=static,short` to select cases and `PAGEGRAB_CAPTURE_SOURCE=/absolute/path/content.js` to compare another version. These checks use a screenshot bridge with a 550 ms interval, not the extension's background queue.
 
-The Firefox integration check requires Python's `selenium` and Pillow packages. Selenium Manager must be able to obtain geckodriver on its first run. It installs the real extension in a temporary Firefox profile and checks capture, image/PDF export, and format storage on an HTTP page. Set `PAGEGRAB_TEST_CLIPBOARD=1` to also check copying, which replaces your clipboard with a capture.
+The Firefox integration check requires Python's `selenium` and Pillow packages. Selenium Manager must be able to obtain geckodriver on its first run. It installs the real extension in a temporary Firefox profile and checks capture, popup edges at 80%, 100%, and 125% zoom, image/PDF export, and format storage on an HTTP page. Set `PAGEGRAB_TEST_CLIPBOARD=1` to also check copying, which replaces your clipboard with a capture.
 
 ```sh
 python3 tests/browser_firefox.py

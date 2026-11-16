@@ -50,11 +50,17 @@
 
   function hideFixedElements(scrollElement, bottomOnly = false) {
     const hidden = [];
+    const bounds = scrollElement === document.scrollingElement
+      ? { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }
+      : scrollElement.getBoundingClientRect();
     for (const el of document.querySelectorAll("*")) {
       if (el.id === PANEL_ID || el === scrollElement || el.contains?.(scrollElement)) continue;
-      const pos = getComputedStyle(el).position;
+      const style = getComputedStyle(el);
+      if (style.visibility === "hidden") continue;
+      const pos = style.position;
       if (pos !== "fixed" && pos !== "sticky") continue;
       const rect = el.getBoundingClientRect();
+      if (rect.right <= bounds.left || rect.left >= bounds.right || rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
       if (bottomOnly && (rect.top < window.innerHeight * .5 || rect.bottom < window.innerHeight - 100)) continue;
       if ((pos === "fixed" || pos === "sticky") && rect.height < window.innerHeight * .7) {
         hidden.push([el, el.style.getPropertyValue("visibility"), el.style.getPropertyPriority("visibility")]);
@@ -207,22 +213,63 @@
     const doc = document.documentElement;
     const page = document.scrollingElement || doc;
     const pageHeight = () => Math.max(page.scrollHeight, doc.scrollHeight, document.body?.scrollHeight || 0, window.innerHeight);
+    const candidates = [...document.querySelectorAll("*")];
+    let overlay = null;
+    let overlayPriority = 0;
+    for (const candidate of candidates) {
+      if (candidate.id === PANEL_ID) continue;
+      const semantic = candidate.matches?.('dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]');
+      if (!semantic && getComputedStyle(candidate).position !== "fixed") continue;
+      const rect = candidate.getBoundingClientRect();
+      if (rect.width < window.innerWidth * .4 || rect.height < window.innerHeight * .4 || rect.bottom <= 0 || rect.top >= window.innerHeight) continue;
+      const front = document.elementFromPoint?.(
+        Math.max(0, Math.min(window.innerWidth - 1, rect.left + rect.width / 2)),
+        Math.max(0, Math.min(window.innerHeight - 1, rect.top + rect.height / 2))
+      );
+      if (front && front !== candidate && !candidate.contains(front)) continue;
+      const priority = semantic ? 2 : 1;
+      if (priority > overlayPriority) { overlay = candidate; overlayPriority = priority; }
+    }
     let element = page;
     let bestArea = 0;
-    // Many apps scroll a main element while the document itself never moves.
-    if (pageHeight() <= window.innerHeight * 1.5) {
-      for (const candidate of document.querySelectorAll("*")) {
-        if (candidate.id === PANEL_ID || candidate.clientHeight < window.innerHeight * .4 || candidate.scrollHeight <= candidate.clientHeight + 2) continue;
-        const rect = candidate.getBoundingClientRect();
-        if (rect.width < window.innerWidth * .4 || rect.top < 0 || rect.bottom > window.innerHeight + 2) continue;
-        if (!/auto|scroll|overlay/.test(getComputedStyle(candidate).overflowY)) continue;
-        const area = rect.width * rect.height;
-        if (area > bestArea) { element = candidate; bestArea = area; }
+    let bestPriority = -1;
+    // A dialog can lock a tall document while scrolling its own content.
+    // Prefer the visible overlay even when the document still reports that height.
+    for (const candidate of candidates) {
+      if (overlay && candidate !== overlay && !overlay.contains(candidate)) continue;
+      if (candidate.id === PANEL_ID || candidate.clientHeight < window.innerHeight * .4 || candidate.scrollHeight <= candidate.clientHeight + 2) continue;
+      const rect = candidate.getBoundingClientRect();
+      if (rect.width < window.innerWidth * .4 || rect.left < 0 || rect.right > window.innerWidth + 2 || rect.top < 0 || rect.bottom > window.innerHeight + 2) continue;
+      if (!/auto|scroll|overlay/.test(getComputedStyle(candidate).overflowY)) continue;
+      const front = document.elementFromPoint?.(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      if (front && front !== candidate && !candidate.contains(front)) continue;
+      let priority = 0;
+      for (let parent = candidate; parent && parent !== page; parent = parent.parentElement) {
+        if (parent.matches?.('dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]')) {
+          priority = 2;
+          break;
+        }
+        if (getComputedStyle(parent).position === "fixed") priority = 1;
       }
+      if (!priority && pageHeight() > window.innerHeight * 1.5) continue;
+      const area = rect.width * rect.height;
+      if (priority > bestPriority || (priority === bestPriority && area > bestArea)) {
+        element = candidate; bestArea = area; bestPriority = priority;
+      }
+    }
+    // A popup that fits on screen needs no scrolling or cropping. Preserve the
+    // entire view, including its title, footer and the page behind the backdrop.
+    if (overlay && element === page) {
+      return {
+        element: overlay, preserveViewport: true,
+        height: () => window.innerHeight, viewport: () => window.innerHeight,
+        x: () => 0, y: () => 0, scroll() {},
+        rect: () => ({ left: 0, top: 0, width: window.innerWidth, height: window.innerHeight })
+      };
     }
     const nested = element !== page;
     return {
-      element,
+      element, includeSurroundings: nested,
       height: () => nested ? element.scrollHeight : pageHeight(),
       viewport: () => nested ? element.clientHeight : window.innerHeight,
       y: () => nested ? element.scrollTop : window.scrollY,
@@ -259,6 +306,35 @@
   }
 
   async function captureFullPage(toast) {
+    try {
+      return await captureScrollingPage(toast);
+    } catch (error) {
+      if (error.code !== "PAGEGRAB_UNSTABLE_LAYOUT") throw error;
+      // captureScrollingPage has restored the original view in its finally block.
+      // Return that view rather than discard everything after repeated resizes.
+      toast.hide();
+      let img;
+      try {
+        await afterPaint();
+        img = await loadImage(await requestCapture());
+        const scale = Math.min(1, MAX_CANVAS_DIM / img.width, MAX_CANVAS_DIM / img.height,
+          Math.sqrt(MAX_CANVAS_AREA / (img.width * img.height)));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("This page is too large to capture");
+        ctx.drawImage(img, 0, 0, img.width, img.height, 0, 0, canvas.width, canvas.height);
+        canvas.captureNotice = "Captured the visible area because the page kept changing size.";
+        return canvas;
+      } finally {
+        if (img) img.src = "";
+        toast.show();
+      }
+    }
+  }
+
+  async function captureScrollingPage(toast) {
     const area = findScrollArea();
     const original = { x: area.x(), y: area.y() };
     const overrides = [];
@@ -268,7 +344,8 @@
         el.style.setProperty(name, value, "important");
       }
     }
-    let restoreFixed;
+    const frameRestorers = [];
+    const restoreFrames = () => { while (frameRestorers.length) frameRestorers.pop()(); };
     let restoreBottom;
     let canvas;
     try {
@@ -297,16 +374,16 @@
       };
       area.scroll(original.x, 0);
       await settle(area);
-      restoreBottom = hideFixedElements(area.element, true);
+      restoreBottom = area.preserveViewport ? null : hideFixedElements(area.element, true);
       let totalH = area.height();
       let drawnUntil = 0;
       let frame = 0;
       let prepared = false;
       let restarts = 0;
-      let pxScale, outScale, ctx, width;
+      let pxScale, outScale, ctx, width, outputHeight;
       const createOutput = () => {
         const fullW = width * pxScale;
-        const fullH = totalH * pxScale;
+        const fullH = outputHeight * pxScale;
         const scale = Math.min(1, MAX_CANVAS_DIM / fullW, MAX_CANVAS_DIM / fullH, Math.sqrt(MAX_CANVAS_AREA / (fullW * fullH)));
         const next = document.createElement("canvas");
         next.width = Math.max(1, Math.round(fullW * scale));
@@ -316,8 +393,8 @@
         canvas = next; ctx = nextCtx; outScale = scale;
       };
       const restartAfterLoading = async () => {
-        if (++restarts > 3) throw new Error("The page keeps changing size. Capture stopped without saving an incomplete image.");
-        if (restoreFixed) { restoreFixed(); restoreFixed = null; }
+        if (++restarts > 3) throw Object.assign(new Error("The page keeps changing size."), { code: "PAGEGRAB_UNSTABLE_LAYOUT" });
+        restoreFrames();
         if (restoreBottom) { restoreBottom(); restoreBottom = null; }
         toast.show();
         if (canvas) { canvas.width = canvas.height = 1; canvas = null; }
@@ -326,11 +403,11 @@
         totalH = area.height();
         drawnUntil = 0;
         area.scroll(original.x, 0);
-        restoreBottom = hideFixedElements(area.element, true);
+        restoreBottom = area.preserveViewport ? null : hideFixedElements(area.element, true);
       };
       while (true) {
         if (++frame > 300) throw new Error("This page keeps adding content. Capture stopped without saving an incomplete image.");
-        if (area.height() !== totalH) {
+        if (Math.abs(area.height() - totalH) > 2) {
           await restartAfterLoading();
           continue;
         }
@@ -339,21 +416,29 @@
         toast.set(`Capturing full page · ${Math.min(99, Math.round(drawnUntil / area.height() * 100))}%`);
         toast.hide();
         await settle(area, prepared ? 0 : target + area.viewport() >= totalH - 2 ? 450 : 160);
-        if (area.height() !== totalH) {
+        if (Math.abs(area.height() - totalH) > 2) {
           await restartAfterLoading();
           continue;
         }
         if (Math.abs(area.y() - target) > 2) throw new Error("The page prevented scrolling. Capture stopped.");
+        if (drawnUntil > 0) {
+          frameRestorers.push(hideFixedElements(area.element));
+          await afterPaint();
+        }
         const actualY = area.y();
         const img = await loadImage(await requestCapture());
         try {
-          if (area.height() !== totalH) {
+          if (Math.abs(area.height() - totalH) > 2) {
             await restartAfterLoading();
             continue;
           }
           const rect = area.rect();
+          const firstFrame = !canvas;
+          const insetX = area.includeSurroundings ? rect.left : 0;
+          const insetY = area.includeSurroundings ? rect.top : 0;
           if (!canvas) {
-            width = rect.width;
+            width = area.includeSurroundings ? window.innerWidth : rect.width;
+            outputHeight = totalH + (area.includeSurroundings ? window.innerHeight - rect.height : 0);
             pxScale = img.width / window.innerWidth;
             createOutput();
           }
@@ -361,23 +446,46 @@
           const bottom = Math.min(totalH, actualY + rect.height);
           if (top > drawnUntil + 2) throw new Error("The page jumped during capture. Please try again.");
           if (bottom > top) {
-            const destTop = Math.round(top * pxScale * outScale);
+            const destTop = Math.round((top + insetY) * pxScale * outScale);
             ctx.drawImage(img, rect.left * pxScale, (rect.top + top - actualY) * pxScale,
               rect.width * pxScale, (bottom - top) * pxScale,
-              0, destTop, canvas.width, Math.round(bottom * pxScale * outScale) - destTop);
+              Math.round(insetX * pxScale * outScale), destTop, Math.round(rect.width * pxScale * outScale),
+              Math.round((bottom + insetY) * pxScale * outScale) - destTop);
             drawnUntil = bottom;
           }
+          if (area.includeSurroundings) {
+            const copy = (x, y, w, h, destY = y, destH = h) => {
+              if (w <= 0 || h <= 0 || destH <= 0) return;
+              const scale = pxScale * outScale;
+              ctx.drawImage(img, x * pxScale, y * pxScale, w * pxScale, h * pxScale,
+                Math.round(x * scale), Math.round(destY * scale),
+                Math.round((x + w) * scale) - Math.round(x * scale),
+                Math.round((destY + destH) * scale) - Math.round(destY * scale));
+            };
+            if (firstFrame) {
+              // Keep the app header and navigation once. Extend only the bottom
+              // row of the side margins alongside the additional page content.
+              copy(0, 0, window.innerWidth, rect.top);
+              for (const [x, w] of [[0, rect.left], [rect.left + rect.width, window.innerWidth - rect.left - rect.width]]) {
+                copy(x, rect.top, w, window.innerHeight - rect.top);
+                copy(x, window.innerHeight - 1, w, 1, window.innerHeight, outputHeight - window.innerHeight);
+              }
+            }
+            if (drawnUntil >= totalH - 2) {
+              copy(rect.left, rect.top + rect.height, rect.width,
+                window.innerHeight - rect.top - rect.height, rect.top + totalH);
+            }
+          }
         } finally { img.src = ""; toast.show(); }
-        if (!restoreFixed && drawnUntil < totalH) restoreFixed = hideFixedElements(area.element);
         if (drawnUntil >= area.height() - 2) {
           await sleep(700);
-          if (area.height() === totalH && drawnUntil >= totalH - 2) break;
+          if (Math.abs(area.height() - totalH) <= 2 && drawnUntil >= totalH - 2) break;
         }
       }
       toast.set("Preparing image…");
       return canvas;
     } finally {
-      if (restoreFixed) restoreFixed();
+      restoreFrames();
       if (restoreBottom) restoreBottom();
       area.scroll(original.x, original.y);
       for (const [el, name, value, priority] of overrides) {
@@ -528,6 +636,7 @@
     const panel = root.querySelector(".panel");
     const status = root.querySelector(".status");
     const setStatus = (message) => { status.textContent = message; };
+    setStatus(canvas.captureNotice || "");
     const settings = root.querySelector(".settings");
     const toggle = root.querySelector(".settings-toggle");
     const setSettings = (open) => { settings.hidden = !open; toggle.setAttribute("aria-expanded", String(open)); };

@@ -40,10 +40,10 @@ try:
   if 'exceptionDetails' in r:raise RuntimeError(r['exceptionDetails'])
   return r.get('result',{}).get('value')
  call('Page.enable');call('Runtime.enable');call('Runtime.addBinding',{'name':'captureBridge'})
- for kind in os.environ.get('PAGEGRAB_CAPTURE_CASES', 'document,nested,static,short').split(','):
+ for kind in os.environ.get('PAGEGRAB_CAPTURE_CASES', 'document,nested,static,short,modal,modal-unmarked,modal-fit,shell').split(','):
   captured=0
   started=time.monotonic()
-  call('Page.navigate',{'url':(out / 'full-page.html').as_uri()+({'nested':'?nested', 'static':'?static', 'short':'?static&short'}.get(kind, ''))})
+  call('Page.navigate',{'url':(out / 'full-page.html').as_uri()+({'nested':'?nested', 'static':'?static', 'short':'?static&short', 'modal':'?modal&static', 'modal-unmarked':'?modal&unmarked&static', 'modal-fit':'?modal&fit&static', 'shell':'?shell&static'}.get(kind, ''))})
   deadline=time.time()+60
   while time.time()<deadline:
    if evaluate("!!document.getElementById('__fpc-panel-host')?.shadowRoot.querySelector('.panel')"):break
@@ -52,15 +52,25 @@ try:
   elapsed=time.monotonic()-started
   result=evaluate("""(async()=>{
    const image=await createImageBitmap(outputBlob);const c=document.createElement('canvas');c.width=image.width;c.height=image.height;const x=c.getContext('2d');x.drawImage(image,0,0);
-   const bottom=[...x.getImageData(Math.floor(c.width/2),c.height-4,1,1).data];
+   const bottomY=isNested && area.scrollHeight>area.clientHeight ? area.getBoundingClientRect().top+area.scrollHeight-4 : c.height-4;
+   const bottom=[...x.getImageData(Math.floor(c.width/2),bottomY,1,1).data];
    const root=document.getElementById('__fpc-panel-host').shadowRoot;
    const panel=root.querySelector('.panel').getBoundingClientRect();
-   return {size:outputSize,bottom,grew,restored:area.scrollTop,maxScroll:Math.max(0,...scrolls),fullHeight:area.scrollHeight,viewport:area.clientHeight,panelTop:panel.top,glass:getComputedStyle(root.querySelector('.panel')).backgroundColor,blur:getComputedStyle(root.querySelector('.panel')).backdropFilter,reducedTransparency:matchMedia('(prefers-reduced-transparency: reduce)').matches};
+   return {leftEdge:[...x.getImageData(15,200,1,1).data],topEdge:[...x.getImageData(100,35,1,1).data],size:outputSize,bottom,grew,restored:area.scrollTop,maxScroll:Math.max(0,...scrolls),fullHeight:area.scrollHeight,viewport:area.clientHeight,panelTop:panel.top,glass:getComputedStyle(root.querySelector('.panel')).backgroundColor,blur:getComputedStyle(root.querySelector('.panel')).backdropFilter,reducedTransparency:matchMedia('(prefers-reduced-transparency: reduce)').matches};
   })()""",True)
   print(kind,result,'screenshots',captured,'seconds',round(elapsed,2),flush=True)
   assert result['grew'] == (kind in ['document', 'nested']) and result['restored']==0
-  assert result['size'][1]==result['fullHeight']
-  assert result['bottom'][:3]==[22,199,132],result
+  if kind == 'modal-fit':
+   assert result['size'][1]==evaluate('innerHeight')
+   assert result['leftEdge'][:3]==[231,70,120],result
+   assert result['topEdge'][:3]==[30,100,210],result
+  else:
+   assert result['size'][1]==result['fullHeight']+evaluate('isNested ? innerHeight-area.clientHeight : 0')
+   assert result['size'][0]==evaluate('innerWidth')
+   assert result['bottom'][:3]==[22,199,132],result
+  if kind == 'shell':
+   assert result['leftEdge'][:3]==[231,70,120],result
+   assert result['topEdge'][:3]==[30,100,210],result
   assert result['maxScroll']+result['viewport']>=result['fullHeight']-2
   assert 10<=result['panelTop']<=20
   data=call('Page.captureScreenshot',{'format':'png'})['data'];(out/('new-'+kind+'.png')).write_bytes(base64.b64decode(data))

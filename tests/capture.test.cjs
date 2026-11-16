@@ -74,7 +74,7 @@ test('do not capture a different active tab', async () => {
   assert.equal(w.calls.length, 0);
 });
 
-function captureContext({ fail = false, grows = false, nested = false, blocked = false } = {}) {
+function captureContext({ fail = false, grows = false, nested = false, blocked = false, modal = false, unmarked = false, fits = false, dynamicHeader = false } = {}) {
   const values = new Map([['scroll-behavior', ['smooth', 'important']]]);
   const style = () => ({
     getPropertyValue: (name) => values.get(name)?.[0] || '',
@@ -90,7 +90,14 @@ function captureContext({ fail = false, grows = false, nested = false, blocked =
   const container = {style:style(), clientHeight:800,clientWidth:700,clientLeft:0,clientTop:0,scrollHeight:2400,scrollTop:120,scrollLeft:0,
     getBoundingClientRect: () => ({left:50,top:100,width:700,height:800,bottom:900}),
     scrollTo({left,top}) {this.scrollLeft=left;this.scrollTop=Math.min(top,this.scrollHeight-this.clientHeight);}};
+  if (dynamicHeader) header.getBoundingClientRect = () => ({ left: 50, top: 100, right: 750, width: 700, height: 60, bottom: 160 });
   if (nested) doc.scrollHeight=1000;
+  const overlay = { parentElement: doc, matches: () => !unmarked, style: style(),
+    contains: (el) => el === container,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 900, bottom: 900 }) };
+  if (fits) container.scrollHeight = container.clientHeight;
+  if (modal) { doc.scrollHeight = 5000; container.parentElement = overlay; }
+
   const canvas = { getContext: () => ({ drawImage: (...args) => draws.push(args.slice(1)) }) };
   const context = {
     window: { scrollX: 0, scrollY: 180, innerHeight: 1000, innerWidth: 800,
@@ -100,15 +107,15 @@ function captureContext({ fail = false, grows = false, nested = false, blocked =
         this.scrollX=left; this.scrollY=Math.min(top,doc.scrollHeight-1000);
         if(grows && !grew && this.scrollY >= 1200) {doc.scrollHeight=4200;grew=true;}
       } },
-    document: { documentElement: doc, scrollingElement:doc, images:[], body: null, querySelectorAll: () => nested ? [container,header] : [header], createElement: () => canvas },
-    getComputedStyle: (el) => ({ position: el === header ? 'fixed' : 'static', overflowY: el === container ? 'auto' : 'visible' }),
+    document: { documentElement: doc, scrollingElement:doc, images:[], body: null, querySelectorAll: () => modal ? [overlay,container,header] : nested ? [container,header] : [header], createElement: () => canvas },
+    getComputedStyle: (el) => ({ position: el === header && dynamicHeader ? (container.scrollTop > 0 ? 'sticky' : 'static') : el === header || el === overlay ? 'fixed' : 'static', overflowY: el === container ? 'auto' : 'visible' }),
     setTimeout: (fn) => fn(), requestAnimationFrame: (fn) => fn(),
     Image: class { width = 800; height = 1000; set src(value) { if (value) this.onload(); } },
     chrome: { runtime: { sendMessage: (_, fn) => fn(fail ? { error: 'Capture failed' } : { dataUrl: 'image' }) } }
   };
   const source = read('content.js');
   vm.runInNewContext(source.slice(0, source.lastIndexOf('  (async () => {')) + 'globalThis.capture = captureFullPage; globalThis.settle = settle;})();', context);
-  return { context, draws, values, canvas, container, scrolls };
+  return { context, draws, values, canvas, container, scrolls, header };
 }
 const toast = { set() {}, hide() {}, show() {} };
 
@@ -198,16 +205,35 @@ test('a shrinking page is recaptured at its new height', async () => {
   assert.equal(draws.at(-1)[5] + draws.at(-1)[7], 1400);
 });
 
-test('repeated layout changes stop capture and restore page settings', async () => {
-  const { context, values } = captureContext();
+test('repeated layout changes return the restored visible view with an explicit notice', async () => {
+  const { context, values, canvas } = captureContext();
+  const scrollsAtCapture = [];
   context.chrome.runtime.sendMessage = (_, fn) => {
+    scrollsAtCapture.push(context.window.scrollY);
     context.document.documentElement.scrollHeight += 10;
     fn({ dataUrl: 'image' });
   };
-  await assert.rejects(context.capture(toast), /keeps changing size/);
+  assert.equal(await context.capture(toast), canvas);
+  assert.equal(canvas.height, 1000);
+  assert.equal(canvas.width, 800);
+  assert.match(canvas.captureNotice, /visible area/);
+  assert.equal(scrollsAtCapture.at(-1), 180);
   assert.equal(context.window.scrollY, 180);
   assert.deepEqual(values.get('scroll-behavior'), ['smooth', 'important']);
   assert.equal(values.has('visibility'), false);
+});
+
+test('one-pixel height jitter does not restart an otherwise complete capture', async () => {
+  const { context, canvas } = captureContext();
+  let shots = 0;
+  context.chrome.runtime.sendMessage = (_, fn) => {
+    context.document.documentElement.scrollHeight = ++shots % 2 ? 2201 : 2200;
+    fn({ dataUrl: 'image' });
+  };
+  await context.capture(toast);
+  assert.equal(shots, 3);
+  assert.equal(canvas.height, 2200);
+  assert.equal(canvas.captureNotice, undefined);
 });
 
 test('restore scroll settings when capture fails', async () => {
@@ -231,12 +257,50 @@ test('include content appended when scrolling reaches the original bottom', asyn
 test('scroll and capture the main container when the document does not scroll', async () => {
   const {context,canvas,draws,container}=captureContext({nested:true});
   await context.capture(toast);
-  assert.equal(canvas.height,2400);
-  assert.equal(canvas.width,700);
+  assert.equal(canvas.height,2600);
+  assert.equal(canvas.width,800);
   assert.equal(draws[0][0],50);
   assert.equal(draws[0][1],100);
-  assert.equal(draws.at(-1)[5]+draws.at(-1)[7],2400);
+  assert.equal(draws.at(-1)[5]+draws.at(-1)[7],2600);
   assert.equal(container.scrollTop,120);
+});
+
+for (const unmarked of [false, true]) {
+  test(`capture the ${unmarked ? 'unmarked fixed popup' : 'dialog'} over a tall document`, async () => {
+    const { context, canvas, draws, container } = captureContext({ modal: true, unmarked });
+    await context.capture(toast);
+    assert.equal(canvas.height, 2600);
+    assert.equal(canvas.width, 800);
+    assert.equal(draws[0][0], 50);
+    assert.equal(draws[0][1], 100);
+    assert.equal(draws.at(-1)[5] + draws.at(-1)[7], 2600);
+    assert.equal(container.scrollTop, 120);
+    assert.equal(context.window.scrollY, 180);
+  });
+}
+
+test('headings that become sticky after scrolling appear only in the first frame', async () => {
+  const { context, header } = captureContext({ nested: true, dynamicHeader: true });
+  const visible = [];
+  context.chrome.runtime.sendMessage = (_, fn) => {
+    visible.push(header.style.getPropertyValue('visibility'));
+    fn({ dataUrl: 'image' });
+  };
+  await context.capture(toast);
+  assert.deepEqual(visible, ['', 'hidden', 'hidden']);
+  assert.equal(header.style.getPropertyValue('visibility'), '');
+});
+
+test('a popup that fits preserves the complete viewport without scrolling the page', async () => {
+  const { context, canvas, draws, container, scrolls, values } = captureContext({ modal: true, fits: true });
+  await context.capture(toast);
+  assert.equal(canvas.width, 800);
+  assert.equal(canvas.height, 1000);
+  assert.deepEqual(draws, [[0, 0, 800, 1000, 0, 0, 800, 1000]]);
+  assert.deepEqual(scrolls, []);
+  assert.equal(context.window.scrollY, 180);
+  assert.equal(container.scrollTop, 120);
+  assert.equal(values.has('visibility'), false);
 });
 
 test('fail visibly when a page blocks scrolling instead of returning a partial capture', async () => {
